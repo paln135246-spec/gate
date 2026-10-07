@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 VPN Gate SSTP 节点检测流水线 (精简版)
-=====================================
+======================================
 流程:
   1. 获取 VPN Gate 原始节点
   2. 只保留带 TCP 入口的 SSTP 节点
@@ -40,13 +40,16 @@ VPNGATE_MIRROR = os.environ.get(
     "VPNGATE_MIRROR",
     "https://raw.githubusercontent.com/fdciabdul/Vpngate-Scraper-API/main/json/data.json",
 )
-WORKER_CHECK_URL = os.environ.get("CHECK_WORKER", "https://你的域名/check?sstp=vpn:vpn@")
+WORKER_CHECK_URL = os.environ.get("CHECK_WORKER", "https://你的域名/check?sstp=vpn:vpn@").strip()
 CONCURRENCY = max(1, int(os.environ.get("CHECK_CONCURRENCY", "32")))
 CHECK_TIMEOUT = float(os.environ.get("CHECK_TIMEOUT", "90"))
 MAX_CHECK_NODES = int(os.environ.get("MAX_CHECK_NODES", "0"))
 HTTP_TIMEOUT = int(os.environ.get("HTTP_TIMEOUT", "60"))
 PUBLIC_DIR = os.environ.get("PUBLIC_DIR", os.path.join(REPO_DIR, "public"))
 TEMPLATE_HTML = os.path.join(REPO_DIR, "web", "index.html")
+
+if not WORKER_CHECK_URL.startswith(("http://", "https://")):
+    die(f"CHECK_WORKER 配置无效: {WORKER_CHECK_URL!r}，请填写完整 URL，例如 https://example.com/check?sstp=vpn:vpn@")
 
 DATA_CENTER_ORG_KEYWORDS = [
     "GOOGLE", "AMAZON", "AWS", "MICROSOFT", "OVH", "HETZNER", "DIGITALOCEAN",
@@ -147,15 +150,17 @@ def parse_csv(text):
             if "base64" in h.lower():
                 idx["openvpn_configdata_base64"] = i
                 break
-    pos = {"hostname": idx.get("hostname", 0), "ip": idx.get("ip", 1), "countrylong": idx.get("countrylong", 5), "countryshort": idx.get("countryshort", 6), "openvpn_configdata_base64": idx.get("openvpn_configdata_base64", len(header) - 1)}
+    pos = {"hostname": idx.get("hostname", 0), "ip": idx.get("ip", 1), "countrylong": idx.get("countrylong", 5), "countryshort": idx.get("countryshort", 6), "openvpn_configdata_base64": idx.get("openvpn_configdata_base64", 0)}
 
     rows = []
     for ln in data_lines:
         fields = next(csv.reader(io.StringIO(ln)))
-        if len(fields) < 7: continue
+        if len(fields) < 7:
+            continue
         host = fields[pos["hostname"]].strip()
         ip = fields[pos["ip"]].strip()
-        if not host or not ip: continue
+        if not host or not ip:
+            continue
         rows.append({"host": host, "ip": ip, "country_long": fields[pos["countrylong"]].strip(), "country_short": fields[pos["countryshort"]].strip(), "config_b64": fields[pos["openvpn_configdata_base64"]].strip()})
     return rows
 
@@ -171,8 +176,9 @@ def parse_mirror_json(data):
     for s in servers:
         host = str(s.get("hostname") or s.get("host") or "").strip()
         ip = str(s.get("ip") or "").strip()
-        if not host or not ip: continue
-        rows.append({"host": host, "ip": ip, "country_long": str(s.get("countrylong") or s.get("country_long") or s.get("country") or "").strip(), "country_short": str(s.get("countryshort") or s.get("country_short") or "").strip(), "config_b64": str(s.get("openvpn_configdata_base64") or s.get("config_b64") or "").strip()})
+        if not host or not ip:
+            continue
+        rows.append({"host": host, "ip": ip, "country_long": str(s.get("countrylong") or s.get("country_long") or s.get("country") or "").strip(), "country_short": str(s.get("countryshort") or s.get("country_short") or "").strip(), "config_b64": ""})
     return rows
 
 # ---------------------------------------------------------------------------
@@ -190,11 +196,14 @@ def to_sstp_nodes(rows):
                 cfg = base64.b64decode(r["config_b64"], validate=False).decode("utf-8", "replace")
             except Exception:
                 cfg = ""
-        if not _PROTO_TCP_RE.search(cfg): continue
+        if not _PROTO_TCP_RE.search(cfg):
+            continue
         m = _REMOTE_RE.search(cfg)
-        if not m: continue
+        if not m:
+            continue
         port = int(m.group(1))
-        if not (1 <= port <= 65535): continue
+        if not (1 <= port <= 65535):
+            continue
         host = r["host"]
         if not host.endswith(".opengw.net"):
             host = f"{host}.opengw.net"
@@ -206,7 +215,8 @@ def dedupe(nodes):
     out = []
     for n in nodes:
         key = (n["host"].lower(), n["port"], "sstp")
-        if key in seen: continue
+        if key in seen:
+            continue
         seen.add(key)
         out.append(n)
     return out
@@ -215,15 +225,21 @@ def dedupe(nodes):
 # 检测 Worker
 # ---------------------------------------------------------------------------
 def classify_network(host, exit_org, is_datacenter=None):
-    if is_datacenter is True: return "datacenter"
-    if is_datacenter is False: return "residential"
+    if is_datacenter is True:
+        return "datacenter"
+    if is_datacenter is False:
+        return "residential"
     org = (exit_org or "").upper()
     if org:
-        if any(k in org for k in DATA_CENTER_ORG_KEYWORDS): return "datacenter"
-        if any(k in org for k in RESIDENTIAL_ORG_KEYWORDS): return "residential"
+        if any(k in org for k in DATA_CENTER_ORG_KEYWORDS):
+            return "datacenter"
+        if any(k in org for k in RESIDENTIAL_ORG_KEYWORDS):
+            return "residential"
     h = host.lower()
-    if h.startswith("public-vpn"): return "datacenter"
-    if re.match(r"^vpn\d{5,}", h) or re.match(r"^vpnv\d+", h): return "residential"
+    if h.startswith("public-vpn"):
+        return "datacenter"
+    if re.match(r"^vpn\d{5,}", h) or re.match(r"^vpnv\d+", h):
+        return "residential"
     return "unknown"
 
 def check_one(node, session):
@@ -252,7 +268,7 @@ def check_one(node, session):
         if exit_info:
             asn = exit_info.get("asn") or {}
             org = asn.get("org") or asn.get("name") or ""
-            out["exit"] = {"ip": exit_info.get("ip"), "country": exit_info.get("country"), "country_code": exit_info.get("country_code"), "city": exit_info.get("city"), "continent": exit_info.get("continent"), "asn": asn.get("asn"), "org": org, "type": asn.get("type"), "is_datacenter": exit_info.get("is_datacenter")}
+            out["exit"] = {"ip": exit_info.get("ip"), "country": exit_info.get("country"), "country_code": exit_info.get("country_code"), "city": exit_info.get("city"), "continent": exit_info.get("continent")}
             out["residential"] = classify_network(out["host"], org, exit_info.get("is_datacenter"))
         else:
             out["residential"] = classify_network(out["host"], None, None)
@@ -280,7 +296,7 @@ def build_outputs(results, raw_count, sstp_count, source):
         c = n["country"] or "未知"
         countries.setdefault(c, {"code": n["country_code"] or "?", "nodes": []})["nodes"].append(n)
 
-    stats = {"raw_nodes": raw_count, "sstp_nodes": sstp_count, "checked": len(results), "success": len(available), "failed": len(results) - len(available), "countries": len(countries), "residential_est": sum(1 for n in available if n["residential"] == "residential"), "datacenter_est": sum(1 for n in available if n["residential"] == "datacenter")}
+    stats = {"raw_nodes": raw_count, "sstp_nodes": sstp_count, "checked": len(results), "success": len(available), "failed": len(results) - len(available), "countries": len(countries), "residential": sum(1 for n in available if n.get("residential") == "residential"), "datacenter": sum(1 for n in available if n.get("residential") == "datacenter")}
     by_country = {}
     for name, grp in countries.items():
         grp["count"] = len(grp["nodes"])
